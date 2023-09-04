@@ -1,0 +1,194 @@
+---
+title: "project"
+output: html_document
+date: '2022-06-01'
+---
+# 1 dimension fussed lasso problem
+
+## we use the stock price as the input of this problem
+```{r}
+library("quantmod")
+stockprice<-getSymbols("PBR",src="yahoo",from="2021-01-01",to="2021-06-01",auto.assign=FALSE)
+ts.plot(stockprice$PBR.Close)
+```
+
+## create_iD is the function that create the matrix D in fussed lasso problem. We only nedd to input the panelty vector and the length of the data and we can get matrix D
+```{r}
+create_1D<-function(dim,vec){
+  lef<-c()
+  rig<-matrix(0,dim-length(vec)+1,length(vec)-1)
+  D<-matrix(0,dim-length(vec)+1,dim)
+  for (i in 1:length(vec)) {
+    rig<-matrix(0,dim-length(vec)+1,length(vec)-i)
+    D=D+cbind(lef,vec[i]*diag(dim-length(vec)+1),rig)
+    lef<-cbind(lef,rep(0,dim-length(vec)+1))
+  }
+  return(D)
+}
+```
+
+## define soft rhreshold function which will be used in the next section
+```{r}
+soft_threshold <- function(a, threshold){
+  as.vector(sign(a)*max(0, abs(a)-threshold))
+}
+```
+
+## define the function of solving fused lasso problem with ADMM method.
+```{r}
+flp_1D<-function(vec,y,tau,rho,iter,error){
+  n<-length(y)
+  D<-create_1D(n,vec)
+  ID<-solve(diag(n)+rho*t(D)%*%D)
+  beta<-rep(mean(y),n)
+  num_lim<-nrow(D)
+  delta<-matrix(0,1,num_lim)
+  lambda<-matrix(0,1,num_lim)
+  err<-c()
+  loss<-c()
+  for (i in 2:(iter+1)) {
+    b<-ID%*%(y+rho*t(D)%*%(delta[i-1,]-lambda[i-1,]/rho))
+    d<-soft_threshold(D%*%b+lambda[i-1,]/rho, tau/rho)
+    l<-lambda[i-1,]+rho*(D%*%b-d)
+    beta<-rbind(beta,as.vector(b))
+    delta<-rbind(delta,as.vector(d))
+    lambda<-rbind(lambda,as.vector(l))
+    e<-max(abs(beta[i]- beta[i-1]))
+    los<-0.5*sum((y-b)^2)+tau*sum(abs(D%*%b))
+    err[i-1]=e
+    loss[i-1]=los
+    if(e<error)
+      break
+  }
+  return(list(beta=beta,lambda=lambda,delta=delta,loss=loss,err=err))
+}
+```
+# the 1 dimension fussed lasso problem is defined as follows
+![](C:/Users/qaz12/Downloads/K1.png)
+
+# the panelty vector of this problem is (1,-2,1) the next experiment use tao=1, rho=0.01, iteration=1000, error=10^-7
+```{r}
+experiment1<-flp_1D(c(1,-2,1),stockprice$PBR.Close,1,0.01,2000,10^-7)
+```
+
+# view the convergence of beta in the experiment
+```{r}
+ts.plot(experiment1$beta); title("beta")
+```
+\
+we observe that the beta converges after 600 iterations and parameters beta are divided into upper and lower parts with three as the boundary.
+
+## we do another experiment to see the result of different panelty vector. this time we use (1,-3,-2,3,1,1,1) as the panelty vector
+```{r}
+experiment2<-flp_1D(c(1,-1),stockprice$PBR.Close,10,0.01,2000,10^-7)
+ts.plot(cbind(stockprice$PBR.Close,experiment1$beta[nrow(experiment1$beta),],experiment2$beta[nrow(experiment2$beta),]),col=1:3)
+```
+
+## we check the convergence of loss
+```{r}
+ts.plot(experiment2$loss,col=2, ylab = "Loss"); title("loss")
+```
+
+# 2 dimension fussed lasso problem
+
+## we use the gaussian process result as the input data
+```{r}
+library(fields)
+library(stats)
+f1 <- function(d, range){
+   exp(-d/range)
+}
+n <- 20 #high resolution
+x <- seq(0,1, length=n)
+grid1 <- expand.grid(x,x)
+D2 <- as.matrix(stats::dist(grid1, diag=T, upper=T))
+Sigma <- f1(D2,range=0.5)
+B <- chol(Sigma) # Sigma=B'B
+
+nrep <- 1
+z <- matrix(rnorm((n^2)*nrep),n^2,nrep)
+y <- t(B)%*% z
+data<-y
+```
+
+## the create_2D function use length of data, panelty vector on x-axis and panelty vector on y-axis as the input, the output of create_2D is matrix D
+```{r}
+create_2D<-function(dim,UD,LR){
+  n<-dim[1]
+  r<-dim[2]
+  c<-dim[3]
+  D<-c()
+  D1<-matrix(0,(r-length(UD)+1)*c,n)
+  IND=0
+  for (i in 1:c) {
+    start=i
+    for (j in 1:(r-length(UD)+1)) {
+      IND=IND+1
+      for (k in 1:length(UD)) {
+        D1[IND,start+(k-1)*c]=UD[k]
+      }
+      start=start+c
+    }
+  }
+  D2<-c()
+  dup<-create_1D(c,LR)
+  lef<-c()
+  rig<-matrix(0,c-length(LR)+1,n)
+  for (i in 1:r) {
+    rig<-rig[,-c(1:c)]
+    lr<-cbind(lef,dup,rig)
+    lef<-cbind(lef,matrix(0,c-length(LR)+1,c))
+    D2<-rbind(D2,lr)
+  }
+  return(rbind(D1,D2))
+}
+```
+## define the function of solving fused lasso problem with ADMM method.
+```{r}
+flp_2D<-function(UD,LR,r,c,y,tau,rho,iter,error){
+  n<-length(y)
+  D<-create_2D(c(n,r,c),UD,LR)
+  ID<-solve(diag(n)+rho*t(D)%*%D)
+  beta<-rep(mean(y),n)
+  num_lim<-nrow(D)
+  delta<-matrix(0,1,num_lim)
+  lambda<-matrix(0,1,num_lim)
+  err<-c()
+  loss<-c()
+  for (i in 2:(iter+1)) {
+    b<-ID%*%(y+rho*t(D)%*%(delta[i-1,]-lambda[i-1,]/rho))
+    d<-soft_threshold(D%*%b+lambda[i-1,]/rho, tau/rho)
+    l<-lambda[i-1,]+rho*(D%*%b-d)
+    beta<-rbind(beta,as.vector(b))
+    delta<-rbind(delta,as.vector(d))
+    lambda<-rbind(lambda,as.vector(l))
+    e<-max(abs(beta[i]- beta[i-1]))
+    los<-0.5*sum((y-b)^2)+tau*sum(abs(D%*%b))
+    err[i-1]=e
+    loss[i-1]=los
+    if(e<error)
+      break
+  }
+  return(list(beta=beta,lambda=lambda,delta=delta,loss=loss,err=err))
+}
+```
+## we do 3 experiment. one only do panelty on x axis, one only do panelty on y axis, one do panelty on both x and y axis.
+```{r}
+experiment3<-flp_2D(0,c(1,-2,1),20,20,y,10,0.01,2000,10^-12)
+experiment4<-flp_2D(c(1,-2,1),0,20,20,y,10,0.01,2000,10^-12)
+experiment5<-flp_2D(c(1,-1),c(1,-2,1),20,20,y,10,0.01,2000,10^-12)
+```
+## view the plot of the 3 result
+```{r}
+quilt.plot(grid1,y,nx=20, ny=20)
+quilt.plot(grid1,experiment3$beta[nrow(experiment3$beta),], nx=20, ny=20)
+quilt.plot(grid1,experiment4$beta[nrow(experiment4$beta),], nx=20, ny=20)
+quilt.plot(grid1,experiment5$beta[nrow(experiment5$beta),], nx=20, ny=20)
+```
+
+## we check the convergence of loss and error
+```{r}
+ts.plot(experiment5$loss)
+ts.plot(experiment5$err)
+```
+
